@@ -202,6 +202,65 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """알림 구독"""
+    state = load_state()
+    chat_id = str(update.effective_chat.id)
+    user_name = update.effective_user.first_name or "사용자"
+
+    subscribers = state.get('subscribers', [])
+
+    if chat_id in subscribers:
+        await update.message.reply_text(
+            f"ℹ️ 이미 알림을 구독 중입니다.\n\n구독 해제: /unsubscribe",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    subscribers.append(chat_id)
+    state['subscribers'] = subscribers
+    save_state(state)
+
+    await update.message.reply_text(
+        f"""✅ <b>알림 구독 완료!</b>
+
+{user_name}님, 이제 다음 알림을 받습니다:
+• 09:05 - 장 시작가 알림
+• 15:30 - 장 마감 종가 알림
+• 설정한 % 변동 시 즉시 알림
+
+구독 해제: /unsubscribe""",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    logger.info(f"새 구독자: {chat_id} ({user_name})")
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """알림 구독 해제"""
+    state = load_state()
+    chat_id = str(update.effective_chat.id)
+
+    subscribers = state.get('subscribers', [])
+
+    if chat_id not in subscribers:
+        await update.message.reply_text(
+            "ℹ️ 구독 중이 아닙니다.\n\n구독하기: /subscribe",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    subscribers.remove(chat_id)
+    state['subscribers'] = subscribers
+    save_state(state)
+
+    await update.message.reply_text(
+        "🔕 알림 구독이 해제되었습니다.\n\n다시 구독: /subscribe",
+        reply_markup=get_main_keyboard()
+    )
+    logger.info(f"구독 해제: {chat_id}")
+
+
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """소스 업데이트 및 재시작 (관리자 전용)"""
     config = load_config()
@@ -459,7 +518,11 @@ async def show_help(query):
 <b>자동 알림</b>
 • 09:05 - 장 시작가 알림
 • 15:30 - 장 마감 종가 알림
-• 설정한 % 변동 시 즉시 알림"""
+• 설정한 % 변동 시 즉시 알림
+
+<b>명령어</b>
+• /subscribe - 알림 구독
+• /unsubscribe - 구독 해제"""
 
     await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
 
@@ -467,18 +530,29 @@ async def show_help(query):
 # ============ 주가 모니터링 ============
 
 async def send_alert(app, config, message):
-    """알림 전송"""
-    chat_id = config['telegram']['chat_id']
-    try:
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text=message,
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-        logger.info(f"알림 전송: {message[:50]}...")
-    except Exception as e:
-        logger.error(f"알림 전송 실패: {e}")
+    """모든 구독자에게 알림 전송"""
+    state = load_state()
+    subscribers = state.get('subscribers', [])
+
+    # 관리자도 포함 (중복 방지)
+    admin_id = str(config['telegram']['chat_id'])
+    if admin_id not in subscribers:
+        subscribers = [admin_id] + subscribers
+
+    sent_count = 0
+    for chat_id in subscribers:
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"알림 전송 실패 ({chat_id}): {e}")
+
+    logger.info(f"알림 전송 완료: {sent_count}/{len(subscribers)}명")
 
 
 async def price_monitor(app):
@@ -595,6 +669,8 @@ async def main():
     # 핸들러 등록
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("subscribe", subscribe))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("restart", restart))
     app.add_handler(CallbackQueryHandler(button_callback))
 
