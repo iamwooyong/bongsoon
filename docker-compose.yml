@@ -6,7 +6,6 @@ services:
     container_name: isens-bot
     restart: always
     volumes:
-      - ./config.json:/app/config.json
-      - ./state.json:/app/state.json
+      - .:/app
     environment:
       - TZ=Asia/Seoul
