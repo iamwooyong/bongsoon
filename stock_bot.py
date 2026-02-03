@@ -330,7 +330,7 @@ async def show_price(query):
     """현재가 표시"""
     price_data = get_stock_price()
     if not price_data:
-        await query.edit_message_text("❌ 주가 조회 실패", reply_markup=get_main_keyboard())
+        await query.message.reply_text("❌ 주가 조회 실패", reply_markup=get_main_keyboard())
         return
 
     change = price_data['change_rate']
@@ -348,7 +348,7 @@ async def show_price(query):
 
 ⏰ {price_data['timestamp']}"""
 
-    await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
+    await query.message.reply_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 
 async def show_orderbook(query):
@@ -357,7 +357,7 @@ async def show_orderbook(query):
     price_data = get_stock_price()
 
     if not orderbook or not price_data:
-        await query.edit_message_text("❌ 호가 조회 실패", reply_markup=get_main_keyboard())
+        await query.message.reply_text("❌ 호가 조회 실패", reply_markup=get_main_keyboard())
         return
 
     lines = [f"📊 <b>{STOCK_NAME} 호가</b>\n"]
@@ -382,7 +382,7 @@ async def show_orderbook(query):
     lines.append("─" * 20)
     lines.append(f"⏰ {orderbook['timestamp']}")
 
-    await query.edit_message_text('\n'.join(lines), parse_mode='HTML', reply_markup=get_main_keyboard())
+    await query.message.reply_text('\n'.join(lines), parse_mode='HTML', reply_markup=get_main_keyboard())
 
 
 async def show_chart(query):
@@ -395,7 +395,7 @@ async def show_chart(query):
 
 🔗 <a href="https://m.stock.naver.com/domestic/stock/{STOCK_CODE}/total">네이버 금융</a>"""
 
-    await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard(), disable_web_page_preview=False)
+    await query.message.reply_text(message, parse_mode='HTML', reply_markup=get_main_keyboard(), disable_web_page_preview=False)
 
 
 async def show_alert_menu(query):
