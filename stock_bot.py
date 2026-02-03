@@ -650,8 +650,8 @@ async def price_monitor(app):
                         state['sent_open_alert'] = True
                         save_state(state)
 
-                    # 점심 전 현재가 알림 (11:59)
-                    if not state.get('sent_noon_alert') and now.hour == 11 and now.minute >= 59:
+                    # 점심 전 현재가 알림 (11:59 이후)
+                    if not state.get('sent_noon_alert') and ((now.hour == 11 and now.minute >= 59) or now.hour >= 12):
                         change_from_open = ((current_price - open_price) / open_price) * 100
                         arrow = "🔺" if change_from_open >= 0 else "🔻"
 
