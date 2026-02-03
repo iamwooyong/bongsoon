@@ -2,6 +2,7 @@ version: '3'
 services:
   isens-bot:
     build: .
+    image: isens-bot:latest
     container_name: isens-bot
     restart: always
     volumes:
