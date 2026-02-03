@@ -559,6 +559,7 @@ async def show_help(query):
 
 <b>자동 알림</b>
 • 09:05 - 장 시작가 알림
+• 11:59 - 오전장 현재가 알림
 • 15:30 - 장 마감 종가 알림
 • 설정한 % 변동 시 즉시 알림
 
@@ -627,13 +628,14 @@ async def price_monitor(app):
                         state['last_date'] = today
                         state['open_price'] = open_price
                         state['sent_open_alert'] = False
+                        state['sent_noon_alert'] = False
                         state['sent_close_alert'] = False
                         # 모든 사용자의 last_alert_price 초기화
                         for chat_id in state.get('users', {}):
                             state['users'][chat_id]['last_alert_price'] = open_price
                         save_state(state)
 
-                    # 시작가 알림 (모든 활성 사용자)
+                    # 시작가 알림 (09:05)
                     if not state.get('sent_open_alert') and now.hour == 9 and now.minute >= 5:
                         change = ((open_price - price_data['prev_close']) / price_data['prev_close']) * 100
                         arrow = "🔺" if change >= 0 else "🔻"
@@ -646,6 +648,26 @@ async def price_monitor(app):
 
                         await send_to_all_active(app, message)
                         state['sent_open_alert'] = True
+                        save_state(state)
+
+                    # 점심 전 현재가 알림 (11:59)
+                    if not state.get('sent_noon_alert') and now.hour == 11 and now.minute >= 59:
+                        change_from_open = ((current_price - open_price) / open_price) * 100
+                        arrow = "🔺" if change_from_open >= 0 else "🔻"
+
+                        message = f"""🕛 <b>{STOCK_NAME} 오전장 마감</b>
+
+💰 현재가: {format_price(current_price)}원
+{arrow} 시가대비: {change_from_open:+.2f}%
+
+📊 시가: {format_price(open_price)}원
+📈 고가: {format_price(price_data['high'])}원
+📉 저가: {format_price(price_data['low'])}원
+
+⏰ {now.strftime('%H:%M')}"""
+
+                        await send_to_all_active(app, message)
+                        state['sent_noon_alert'] = True
                         save_state(state)
 
                     # 변동 알림 (개인별 threshold 적용)
