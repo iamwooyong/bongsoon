@@ -161,7 +161,7 @@ def get_main_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_alert_keyboard(current_threshold):
+def get_alert_keyboard(current_threshold, chat_id=None):
     """변동 알림 설정 키보드"""
     options = [1, 2, 3, 5]
     keyboard = []
@@ -176,6 +176,18 @@ def get_alert_keyboard(current_threshold):
     alert_enabled = state.get('alert_enabled', True)
     status = "🔔 알림 ON" if alert_enabled else "🔕 알림 OFF"
     keyboard.append([InlineKeyboardButton(status, callback_data='alert_toggle')])
+
+    # 구독 상태 확인
+    subscribers = state.get('subscribers', [])
+    config = load_config()
+    admin_id = str(config['telegram']['chat_id'])
+
+    if chat_id and str(chat_id) != admin_id:
+        if str(chat_id) in subscribers:
+            keyboard.append([InlineKeyboardButton("🔕 구독 해제", callback_data='unsubscribe')])
+        else:
+            keyboard.append([InlineKeyboardButton("🔔 알림 구독", callback_data='subscribe')])
+
     keyboard.append([InlineKeyboardButton("◀️ 뒤로", callback_data='back')])
     return InlineKeyboardMarkup(keyboard)
 
@@ -319,6 +331,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_alert_threshold(query, threshold)
     elif data == 'alert_toggle':
         await toggle_alert(query)
+    elif data == 'subscribe':
+        await subscribe_button(query)
+    elif data == 'unsubscribe':
+        await unsubscribe_button(query)
     elif data == 'settings':
         await show_settings(query)
     elif data == 'help':
@@ -413,17 +429,30 @@ async def show_alert_menu(query):
     alert_enabled = state.get('alert_enabled', True)
     status = "켜짐 🔔" if alert_enabled else "꺼짐 🔕"
 
+    chat_id = query.from_user.id
+    subscribers = state.get('subscribers', [])
+    admin_id = str(config['telegram']['chat_id'])
+
+    # 구독 상태 메시지
+    if str(chat_id) == admin_id:
+        sub_status = "👑 관리자 (항상 수신)"
+    elif str(chat_id) in subscribers:
+        sub_status = "✅ 구독 중"
+    else:
+        sub_status = "❌ 미구독"
+
     message = f"""🔔 <b>변동 알림 설정</b>
 
 현재 설정: <b>{threshold}%</b> 변동 시 알림
 알림 상태: <b>{status}</b>
+내 구독: <b>{sub_status}</b>
 
 원하는 변동률을 선택하세요:"""
 
     await query.edit_message_text(
         message,
         parse_mode='HTML',
-        reply_markup=get_alert_keyboard(threshold)
+        reply_markup=get_alert_keyboard(threshold, chat_id)
     )
 
 
@@ -440,15 +469,8 @@ async def set_alert_threshold(query, threshold):
         state['last_alert_price'] = price_data['current']
         save_state(state)
 
-    message = f"""✅ 변동 알림이 <b>{threshold}%</b>로 설정되었습니다.
-
-현재가 기준으로 {threshold}% 이상 변동 시 알림을 보내드립니다."""
-
-    await query.edit_message_text(
-        message,
-        parse_mode='HTML',
-        reply_markup=get_alert_keyboard(threshold)
-    )
+    # show_alert_menu 재호출
+    await show_alert_menu(query)
 
 
 async def toggle_alert(query):
@@ -458,22 +480,43 @@ async def toggle_alert(query):
     state['alert_enabled'] = not current
     save_state(state)
 
-    config = load_config()
-    threshold = config.get('alert_threshold', 2.0)
+    # show_alert_menu 재호출
+    await show_alert_menu(query)
 
-    status = "켜짐 🔔" if state['alert_enabled'] else "꺼짐 🔕"
-    message = f"""🔔 <b>변동 알림 설정</b>
 
-현재 설정: <b>{threshold}%</b> 변동 시 알림
-알림 상태: <b>{status}</b>
+async def subscribe_button(query):
+    """버튼으로 알림 구독"""
+    state = load_state()
+    chat_id = str(query.from_user.id)
+    user_name = query.from_user.first_name or "사용자"
 
-원하는 변동률을 선택하세요:"""
+    subscribers = state.get('subscribers', [])
 
-    await query.edit_message_text(
-        message,
-        parse_mode='HTML',
-        reply_markup=get_alert_keyboard(threshold)
-    )
+    if chat_id not in subscribers:
+        subscribers.append(chat_id)
+        state['subscribers'] = subscribers
+        save_state(state)
+        logger.info(f"새 구독자: {chat_id} ({user_name})")
+
+    # show_alert_menu 재호출
+    await show_alert_menu(query)
+
+
+async def unsubscribe_button(query):
+    """버튼으로 알림 구독 해제"""
+    state = load_state()
+    chat_id = str(query.from_user.id)
+
+    subscribers = state.get('subscribers', [])
+
+    if chat_id in subscribers:
+        subscribers.remove(chat_id)
+        state['subscribers'] = subscribers
+        save_state(state)
+        logger.info(f"구독 해제: {chat_id}")
+
+    # show_alert_menu 재호출
+    await show_alert_menu(query)
 
 
 async def show_settings(query):
