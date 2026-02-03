@@ -9,10 +9,11 @@
 
 import json
 import sys
+import os
 import time
 import logging
 import requests
-import threading
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -75,20 +76,32 @@ def format_price(price):
 def get_stock_price():
     """네이버 금융에서 주가 정보 가져오기"""
     try:
-        url = f"https://m.stock.naver.com/api/stock/{STOCK_CODE}/basic"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
 
-        current_price = int(data.get('closePrice', '0').replace(',', ''))
-        open_price = int(data.get('openPrice', '0').replace(',', ''))
-        high_price = int(data.get('highPrice', '0').replace(',', ''))
-        low_price = int(data.get('lowPrice', '0').replace(',', ''))
-        prev_diff = int(data.get('compareToPreviousClosePrice', '0').replace(',', ''))
+        # 기본 정보 API
+        basic_url = f"https://m.stock.naver.com/api/stock/{STOCK_CODE}/basic"
+        basic_resp = requests.get(basic_url, headers=headers, timeout=10)
+        basic_resp.raise_for_status()
+        basic_data = basic_resp.json()
+
+        current_price = int(basic_data.get('closePrice', '0').replace(',', ''))
+        prev_diff = int(basic_data.get('compareToPreviousClosePrice', '0').replace(',', ''))
         prev_close = current_price - prev_diff
-        change_rate = float(data.get('fluctuationsRatio', '0'))
-        volume = data.get('accumulatedTradingVolume', '0')
+        change_rate = float(basic_data.get('fluctuationsRatio', '0'))
+
+        # 통합 정보 API (시가, 고가, 저가, 거래량)
+        integration_url = f"https://m.stock.naver.com/api/stock/{STOCK_CODE}/integration"
+        integ_resp = requests.get(integration_url, headers=headers, timeout=10)
+        integ_resp.raise_for_status()
+        integ_data = integ_resp.json()
+
+        # totalInfos에서 필요한 데이터 추출
+        total_infos = {item['code']: item['value'] for item in integ_data.get('totalInfos', [])}
+
+        open_price = int(total_infos.get('openPrice', '0').replace(',', ''))
+        high_price = int(total_infos.get('highPrice', '0').replace(',', ''))
+        low_price = int(total_infos.get('lowPrice', '0').replace(',', ''))
+        volume = total_infos.get('accumulatedTradingVolume', '0')
 
         return {
             'current': current_price,
@@ -114,12 +127,12 @@ def get_orderbook():
         response.raise_for_status()
         data = response.json()
 
-        ask_prices = data.get('askPrices', [])  # 매도호가
-        bid_prices = data.get('bidPrices', [])  # 매수호가
+        sell_info = data.get('sellInfo', [])  # 매도호가
+        buy_infos = data.get('buyInfos', [])  # 매수호가
 
         return {
-            'ask': ask_prices[:5],  # 매도 5호가
-            'bid': bid_prices[:5],  # 매수 5호가
+            'ask': sell_info[:5],  # 매도 5호가
+            'bid': buy_infos[:5],  # 매수 5호가
             'timestamp': datetime.now().strftime('%H:%M:%S')
         }
     except Exception as e:
@@ -187,6 +200,44 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 메뉴를 선택하세요:",
         reply_markup=get_main_keyboard()
     )
+
+
+async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """소스 업데이트 및 재시작 (관리자 전용)"""
+    config = load_config()
+    admin_chat_id = str(config['telegram']['chat_id'])
+    user_chat_id = str(update.effective_chat.id)
+
+    # 관리자만 사용 가능
+    if user_chat_id != admin_chat_id:
+        await update.message.reply_text("⛔ 권한이 없습니다.")
+        return
+
+    await update.message.reply_text("🔄 소스 업데이트 중...")
+
+    try:
+        # git pull 실행
+        script_dir = Path(__file__).parent
+        result = subprocess.run(
+            ['git', 'pull'],
+            cwd=script_dir,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if result.returncode == 0:
+            output = result.stdout.strip() or "Already up to date."
+            await update.message.reply_text(f"✅ 업데이트 완료:\n<code>{output}</code>\n\n🔄 재시작 중...", parse_mode='HTML')
+
+            # 잠시 대기 후 프로세스 종료 (Docker가 자동 재시작)
+            await asyncio.sleep(1)
+            os._exit(0)
+        else:
+            await update.message.reply_text(f"❌ 업데이트 실패:\n<code>{result.stderr}</code>", parse_mode='HTML')
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ 오류: {e}")
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,8 +312,8 @@ async def show_orderbook(query):
     # 매도호가 (역순으로 - 높은 가격이 위로)
     for item in reversed(orderbook['ask']):
         price = int(item.get('price', '0').replace(',', ''))
-        qty = item.get('quantity', '0')
-        lines.append(f"🔴 {format_price(price)}원 | {qty}")
+        count = item.get('count', '0')
+        lines.append(f"🔴 {format_price(price)}원 | {count}주")
 
     lines.append("─" * 20)
     lines.append(f"<b>현재가: {format_price(price_data['current'])}원</b>")
@@ -272,8 +323,8 @@ async def show_orderbook(query):
     # 매수호가
     for item in orderbook['bid']:
         price = int(item.get('price', '0').replace(',', ''))
-        qty = item.get('quantity', '0')
-        lines.append(f"🔵 {format_price(price)}원 | {qty}")
+        count = item.get('count', '0')
+        lines.append(f"🔵 {format_price(price)}원 | {count}주")
 
     lines.append("─" * 20)
     lines.append(f"⏰ {orderbook['timestamp']}")
@@ -544,6 +595,7 @@ async def main():
     # 핸들러 등록
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("restart", restart))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     # 모니터링 태스크 시작
