@@ -3,7 +3,7 @@
 """
 아이센스(099190) 주가 알림봇
 - 시작가/종가 알림
-- 변동 알림 (사용자 설정 가능)
+- 변동 알림 (개인별 설정)
 - 텔레그램 버튼 인터페이스
 """
 
@@ -14,6 +14,7 @@ import time
 import logging
 import requests
 import subprocess
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,6 +39,10 @@ STATE_PATH = Path(__file__).parent / 'state.json'
 STOCK_CODE = '099190'
 STOCK_NAME = '아이센스'
 
+# 기본 설정
+DEFAULT_THRESHOLD = 2
+DEFAULT_ENABLED = True
+
 
 def load_config():
     """설정 파일 로드"""
@@ -48,24 +53,48 @@ def load_config():
         return json.load(f)
 
 
-def save_config(config):
-    """설정 파일 저장"""
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-
-
 def load_state():
     """상태 파일 로드"""
     if STATE_PATH.exists():
         with open(STATE_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return {}
+    return {'users': {}}
 
 
 def save_state(state):
     """상태 파일 저장"""
     with open(STATE_PATH, 'w', encoding='utf-8') as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def get_user_settings(chat_id):
+    """사용자 설정 가져오기"""
+    state = load_state()
+    users = state.get('users', {})
+    return users.get(str(chat_id), None)
+
+
+def set_user_settings(chat_id, settings):
+    """사용자 설정 저장"""
+    state = load_state()
+    if 'users' not in state:
+        state['users'] = {}
+    state['users'][str(chat_id)] = settings
+    save_state(state)
+
+
+def remove_user(chat_id):
+    """사용자 삭제"""
+    state = load_state()
+    if 'users' in state and str(chat_id) in state['users']:
+        del state['users'][str(chat_id)]
+        save_state(state)
+
+
+def get_all_users():
+    """모든 사용자 목록"""
+    state = load_state()
+    return state.get('users', {})
 
 
 def format_price(price):
@@ -95,7 +124,6 @@ def get_stock_price():
         integ_resp.raise_for_status()
         integ_data = integ_resp.json()
 
-        # totalInfos에서 필요한 데이터 추출
         total_infos = {item['code']: item['value'] for item in integ_data.get('totalInfos', [])}
 
         open_price = int(total_infos.get('openPrice', '0').replace(',', ''))
@@ -127,12 +155,12 @@ def get_orderbook():
         response.raise_for_status()
         data = response.json()
 
-        sell_info = data.get('sellInfo', [])  # 매도호가
-        buy_infos = data.get('buyInfos', [])  # 매수호가
+        sell_info = data.get('sellInfo', [])
+        buy_infos = data.get('buyInfos', [])
 
         return {
-            'ask': sell_info[:5],  # 매도 5호가
-            'bid': buy_infos[:5],  # 매수 5호가
+            'ask': sell_info[:5],
+            'bid': buy_infos[:5],
             'timestamp': datetime.now().strftime('%H:%M:%S')
         }
     except Exception as e:
@@ -151,42 +179,37 @@ def get_main_keyboard():
         ],
         [
             InlineKeyboardButton("📈 차트", callback_data='chart'),
-            InlineKeyboardButton("🔔 변동알림", callback_data='alert_menu'),
+            InlineKeyboardButton("🔔 알림설정", callback_data='alert_menu'),
         ],
         [
-            InlineKeyboardButton("⚙️ 설정", callback_data='settings'),
+            InlineKeyboardButton("⚙️ 내설정", callback_data='settings'),
             InlineKeyboardButton("❓ 도움말", callback_data='help'),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_alert_keyboard(current_threshold, chat_id=None):
+def get_alert_keyboard(user_settings):
     """변동 알림 설정 키보드"""
     options = [1, 2, 3, 5]
     keyboard = []
     row = []
+
+    current_threshold = user_settings.get('threshold', DEFAULT_THRESHOLD) if user_settings else DEFAULT_THRESHOLD
+
     for opt in options:
         label = f"{'✅ ' if current_threshold == opt else ''}{opt}%"
         row.append(InlineKeyboardButton(label, callback_data=f'alert_set_{opt}'))
     keyboard.append(row)
 
-    # 알림 ON/OFF
-    state = load_state()
-    alert_enabled = state.get('alert_enabled', True)
-    status = "🔔 알림 ON" if alert_enabled else "🔕 알림 OFF"
-    keyboard.append([InlineKeyboardButton(status, callback_data='alert_toggle')])
-
-    # 구독 상태 확인
-    subscribers = state.get('subscribers', [])
-    config = load_config()
-    admin_id = str(config['telegram']['chat_id'])
-
-    if chat_id and str(chat_id) != admin_id:
-        if str(chat_id) in subscribers:
-            keyboard.append([InlineKeyboardButton("🔕 구독 해제", callback_data='unsubscribe')])
-        else:
-            keyboard.append([InlineKeyboardButton("🔔 알림 구독", callback_data='subscribe')])
+    # 알림 ON/OFF (개인별)
+    if user_settings:
+        alert_enabled = user_settings.get('enabled', DEFAULT_ENABLED)
+        status = "🔔 알림 ON" if alert_enabled else "🔕 알림 OFF"
+        keyboard.append([InlineKeyboardButton(status, callback_data='alert_toggle')])
+        keyboard.append([InlineKeyboardButton("🔕 구독 해제", callback_data='unsubscribe')])
+    else:
+        keyboard.append([InlineKeyboardButton("🔔 알림 구독", callback_data='subscribe')])
 
     keyboard.append([InlineKeyboardButton("◀️ 뒤로", callback_data='back')])
     return InlineKeyboardMarkup(keyboard)
@@ -214,72 +237,12 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """알림 구독"""
-    state = load_state()
-    chat_id = str(update.effective_chat.id)
-    user_name = update.effective_user.first_name or "사용자"
-
-    subscribers = state.get('subscribers', [])
-
-    if chat_id in subscribers:
-        await update.message.reply_text(
-            f"ℹ️ 이미 알림을 구독 중입니다.\n\n구독 해제: /unsubscribe",
-            reply_markup=get_main_keyboard()
-        )
-        return
-
-    subscribers.append(chat_id)
-    state['subscribers'] = subscribers
-    save_state(state)
-
-    await update.message.reply_text(
-        f"""✅ <b>알림 구독 완료!</b>
-
-{user_name}님, 이제 다음 알림을 받습니다:
-• 09:05 - 장 시작가 알림
-• 15:30 - 장 마감 종가 알림
-• 설정한 % 변동 시 즉시 알림
-
-구독 해제: /unsubscribe""",
-        parse_mode='HTML',
-        reply_markup=get_main_keyboard()
-    )
-    logger.info(f"새 구독자: {chat_id} ({user_name})")
-
-
-async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """알림 구독 해제"""
-    state = load_state()
-    chat_id = str(update.effective_chat.id)
-
-    subscribers = state.get('subscribers', [])
-
-    if chat_id not in subscribers:
-        await update.message.reply_text(
-            "ℹ️ 구독 중이 아닙니다.\n\n구독하기: /subscribe",
-            reply_markup=get_main_keyboard()
-        )
-        return
-
-    subscribers.remove(chat_id)
-    state['subscribers'] = subscribers
-    save_state(state)
-
-    await update.message.reply_text(
-        "🔕 알림 구독이 해제되었습니다.\n\n다시 구독: /subscribe",
-        reply_markup=get_main_keyboard()
-    )
-    logger.info(f"구독 해제: {chat_id}")
-
-
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """소스 업데이트 및 재시작 (관리자 전용)"""
     config = load_config()
     admin_chat_id = str(config['telegram']['chat_id'])
     user_chat_id = str(update.effective_chat.id)
 
-    # 관리자만 사용 가능
     if user_chat_id != admin_chat_id:
         await update.message.reply_text("⛔ 권한이 없습니다.")
         return
@@ -287,7 +250,6 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 소스 업데이트 중...")
 
     try:
-        # git pull 실행
         script_dir = Path(__file__).parent
         result = subprocess.run(
             ['git', 'pull'],
@@ -301,12 +263,10 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
             output = result.stdout.strip() or "Already up to date."
             await update.message.reply_text(f"✅ 업데이트 완료:\n<code>{output}</code>\n\n🔄 재시작 중...", parse_mode='HTML')
 
-            # 재시작 후 알림 보낼 chat_id 저장
             state = load_state()
             state['restart_chat_id'] = str(update.effective_chat.id)
             save_state(state)
 
-            # 잠시 대기 후 프로세스 종료 (Docker가 자동 재시작)
             await asyncio.sleep(1)
             os._exit(0)
         else:
@@ -322,6 +282,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     data = query.data
+    chat_id = str(query.from_user.id)
 
     if data == 'price':
         await show_price(query)
@@ -389,7 +350,6 @@ async def show_orderbook(query):
     lines.append("─" * 20)
     lines.append("<b>매도호가</b>")
 
-    # 매도호가 (역순으로 - 높은 가격이 위로)
     for item in reversed(orderbook['ask']):
         price = int(item.get('price', '0').replace(',', ''))
         count = item.get('count', '0')
@@ -400,7 +360,6 @@ async def show_orderbook(query):
     lines.append("─" * 20)
     lines.append("<b>매수호가</b>")
 
-    # 매수호가
     for item in orderbook['bid']:
         price = int(item.get('price', '0').replace(',', ''))
         count = item.get('count', '0')
@@ -414,7 +373,6 @@ async def show_orderbook(query):
 
 async def show_chart(query):
     """차트 이미지 전송"""
-    # 네이버 차트 URL
     chart_url = f"https://ssl.pstatic.net/imgfinance/chart/item/area/day/{STOCK_CODE}.png?sidcode={int(time.time())}"
 
     message = f"""📈 <b>{STOCK_NAME} 일봉 차트</b>
@@ -428,120 +386,155 @@ async def show_chart(query):
 
 async def show_alert_menu(query):
     """변동 알림 설정 메뉴"""
-    config = load_config()
-    threshold = config.get('alert_threshold', 2.0)
-    state = load_state()
-    alert_enabled = state.get('alert_enabled', True)
-    status = "켜짐 🔔" if alert_enabled else "꺼짐 🔕"
+    chat_id = str(query.from_user.id)
+    user_settings = get_user_settings(chat_id)
 
-    chat_id = query.from_user.id
-    subscribers = state.get('subscribers', [])
+    config = load_config()
     admin_id = str(config['telegram']['chat_id'])
 
-    # 구독 상태 메시지
-    if str(chat_id) == admin_id:
-        sub_status = "👑 관리자 (항상 수신)"
-    elif str(chat_id) in subscribers:
-        sub_status = "✅ 구독 중"
-    else:
-        sub_status = "❌ 미구독"
+    if user_settings:
+        threshold = user_settings.get('threshold', DEFAULT_THRESHOLD)
+        enabled = user_settings.get('enabled', DEFAULT_ENABLED)
+        status = "켜짐 🔔" if enabled else "꺼짐 🔕"
 
-    message = f"""🔔 <b>변동 알림 설정</b>
+        if chat_id == admin_id:
+            sub_status = "👑 관리자"
+        else:
+            sub_status = "✅ 구독 중"
 
-현재 설정: <b>{threshold}%</b> 변동 시 알림
-알림 상태: <b>{status}</b>
-내 구독: <b>{sub_status}</b>
+        message = f"""🔔 <b>내 알림 설정</b>
+
+📊 변동 알림: <b>{threshold}%</b> 이상 변동 시
+🔔 알림 상태: <b>{status}</b>
+👤 구독 상태: <b>{sub_status}</b>
 
 원하는 변동률을 선택하세요:"""
+    else:
+        message = f"""🔔 <b>알림 설정</b>
+
+👤 구독 상태: <b>❌ 미구독</b>
+
+알림을 받으려면 구독하세요:"""
 
     await query.edit_message_text(
         message,
         parse_mode='HTML',
-        reply_markup=get_alert_keyboard(threshold, chat_id)
+        reply_markup=get_alert_keyboard(user_settings)
     )
 
 
 async def set_alert_threshold(query, threshold):
-    """알림 임계값 설정"""
-    config = load_config()
-    config['alert_threshold'] = threshold
-    save_config(config)
+    """알림 임계값 설정 (개인별)"""
+    chat_id = str(query.from_user.id)
+    user_settings = get_user_settings(chat_id)
 
-    # 상태 초기화 (새 기준으로 알림 재설정)
-    state = load_state()
-    price_data = get_stock_price()
-    if price_data:
-        state['last_alert_price'] = price_data['current']
-        save_state(state)
+    if not user_settings:
+        # 구독 안 된 상태면 먼저 구독
+        price_data = get_stock_price()
+        user_settings = {
+            'enabled': True,
+            'threshold': threshold,
+            'last_alert_price': price_data['current'] if price_data else 0
+        }
+        set_user_settings(chat_id, user_settings)
+        logger.info(f"새 구독 (threshold 설정): {chat_id}")
+    else:
+        # 기존 사용자 threshold 변경
+        user_settings['threshold'] = threshold
+        # last_alert_price 초기화
+        price_data = get_stock_price()
+        if price_data:
+            user_settings['last_alert_price'] = price_data['current']
+        set_user_settings(chat_id, user_settings)
 
-    # show_alert_menu 재호출
     await show_alert_menu(query)
 
 
 async def toggle_alert(query):
-    """알림 ON/OFF 토글"""
-    state = load_state()
-    current = state.get('alert_enabled', True)
-    state['alert_enabled'] = not current
-    save_state(state)
+    """알림 ON/OFF 토글 (개인별)"""
+    chat_id = str(query.from_user.id)
+    user_settings = get_user_settings(chat_id)
 
-    # show_alert_menu 재호출
+    if user_settings:
+        user_settings['enabled'] = not user_settings.get('enabled', True)
+        set_user_settings(chat_id, user_settings)
+
     await show_alert_menu(query)
 
 
 async def subscribe_button(query):
     """버튼으로 알림 구독"""
-    state = load_state()
     chat_id = str(query.from_user.id)
     user_name = query.from_user.first_name or "사용자"
 
-    subscribers = state.get('subscribers', [])
-
-    if chat_id not in subscribers:
-        subscribers.append(chat_id)
-        state['subscribers'] = subscribers
-        save_state(state)
+    user_settings = get_user_settings(chat_id)
+    if not user_settings:
+        price_data = get_stock_price()
+        user_settings = {
+            'enabled': True,
+            'threshold': DEFAULT_THRESHOLD,
+            'last_alert_price': price_data['current'] if price_data else 0
+        }
+        set_user_settings(chat_id, user_settings)
         logger.info(f"새 구독자: {chat_id} ({user_name})")
 
-    # show_alert_menu 재호출
     await show_alert_menu(query)
 
 
 async def unsubscribe_button(query):
     """버튼으로 알림 구독 해제"""
-    state = load_state()
     chat_id = str(query.from_user.id)
+    config = load_config()
+    admin_id = str(config['telegram']['chat_id'])
 
-    subscribers = state.get('subscribers', [])
+    # 관리자는 구독 해제 불가
+    if chat_id == admin_id:
+        await query.edit_message_text(
+            "👑 관리자는 구독 해제할 수 없습니다.",
+            reply_markup=get_main_keyboard()
+        )
+        return
 
-    if chat_id in subscribers:
-        subscribers.remove(chat_id)
-        state['subscribers'] = subscribers
-        save_state(state)
-        logger.info(f"구독 해제: {chat_id}")
+    remove_user(chat_id)
+    logger.info(f"구독 해제: {chat_id}")
 
-    # show_alert_menu 재호출
-    await show_alert_menu(query)
+    await query.edit_message_text(
+        "🔕 알림 구독이 해제되었습니다.\n\n다시 구독하려면 🔔 알림설정에서 구독하세요.",
+        reply_markup=get_main_keyboard()
+    )
 
 
 async def show_settings(query):
-    """설정 표시"""
+    """개인 설정 표시"""
+    chat_id = str(query.from_user.id)
+    user_settings = get_user_settings(chat_id)
     config = load_config()
-    state = load_state()
+    admin_id = str(config['telegram']['chat_id'])
 
-    alert_enabled = state.get('alert_enabled', True)
-    alert_status = "🔔 켜짐" if alert_enabled else "🔕 꺼짐"
-    threshold = config.get('alert_threshold', 2.0)
-    interval = config.get('check_interval', 60)
-    last_alert = state.get('last_alert_price', '-')
+    if user_settings:
+        threshold = user_settings.get('threshold', DEFAULT_THRESHOLD)
+        enabled = user_settings.get('enabled', DEFAULT_ENABLED)
+        last_alert = user_settings.get('last_alert_price', '-')
 
-    message = f"""⚙️ <b>현재 설정</b>
+        if chat_id == admin_id:
+            role = "👑 관리자"
+        else:
+            role = "👤 구독자"
+
+        message = f"""⚙️ <b>내 설정</b>
 
 📌 종목: {STOCK_NAME} ({STOCK_CODE})
-🔔 알림 상태: {alert_status}
-📊 변동 임계값: {threshold}%
-⏱️ 체크 간격: {interval}초
-📍 마지막 알림가: {format_price(last_alert) if isinstance(last_alert, int) else last_alert}원"""
+🏷️ 역할: {role}
+🔔 알림 상태: {'켜짐' if enabled else '꺼짐'}
+📊 변동 알림: {threshold}%
+📍 기준가: {format_price(last_alert) if isinstance(last_alert, int) else last_alert}원"""
+    else:
+        message = f"""⚙️ <b>내 설정</b>
+
+📌 종목: {STOCK_NAME} ({STOCK_CODE})
+👤 구독 상태: ❌ 미구독
+
+알림을 받으려면 🔔 알림설정에서 구독하세요."""
 
     await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
 
@@ -559,54 +552,61 @@ async def show_help(query):
 <b>📈 차트</b>
 일봉 차트 확인
 
-<b>🔔 변동알림</b>
-변동률 알림 설정 (1~5%)
-알림 ON/OFF 전환
+<b>🔔 알림설정</b>
+• 변동률 설정 (1~5%) - 개인별
+• 알림 ON/OFF - 개인별
+• 구독/구독해제
 
 <b>자동 알림</b>
 • 09:05 - 장 시작가 알림
 • 15:30 - 장 마감 종가 알림
 • 설정한 % 변동 시 즉시 알림
 
-<b>명령어</b>
-• /subscribe - 알림 구독
-• /unsubscribe - 구독 해제"""
+※ 모든 설정은 개인별로 적용됩니다."""
 
     await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 
 # ============ 주가 모니터링 ============
 
-async def send_alert(app, config, message):
-    """모든 구독자에게 알림 전송"""
-    state = load_state()
-    subscribers = state.get('subscribers', [])
+async def send_to_user(app, chat_id, message):
+    """개별 사용자에게 메시지 전송"""
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return True
+    except Exception as e:
+        logger.error(f"전송 실패 ({chat_id}): {e}")
+        return False
 
-    # 관리자도 포함 (중복 방지)
+
+async def send_to_all_active(app, message):
+    """모든 활성 사용자에게 전송 (시작가/종가용)"""
+    config = load_config()
     admin_id = str(config['telegram']['chat_id'])
-    if admin_id not in subscribers:
-        subscribers = [admin_id] + subscribers
+    users = get_all_users()
+
+    # 관리자 포함
+    all_chat_ids = set(users.keys())
+    all_chat_ids.add(admin_id)
 
     sent_count = 0
-    for chat_id in subscribers:
-        try:
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"알림 전송 실패 ({chat_id}): {e}")
+    for chat_id in all_chat_ids:
+        user_settings = users.get(chat_id, {'enabled': True})
+        if user_settings.get('enabled', True):
+            if await send_to_user(app, chat_id, message):
+                sent_count += 1
 
-    logger.info(f"알림 전송 완료: {sent_count}/{len(subscribers)}명")
+    logger.info(f"알림 전송: {sent_count}명")
 
 
 async def price_monitor(app):
     """주가 모니터링 루프"""
     config = load_config()
-    state = load_state()
 
     while True:
         try:
@@ -614,31 +614,26 @@ async def price_monitor(app):
 
             # 평일 장중에만 체크
             if now.weekday() < 5 and 9 <= now.hour < 16:
-                config = load_config()  # 설정 리로드
                 state = load_state()
-
-                # 알림이 꺼져있으면 스킵
-                if not state.get('alert_enabled', True):
-                    await asyncio.sleep(config.get('check_interval', 60))
-                    continue
-
                 price_data = get_stock_price()
+
                 if price_data:
                     today = now.strftime('%Y-%m-%d')
                     current_price = price_data['current']
                     open_price = price_data['open']
-                    threshold = config.get('alert_threshold', 2.0)
 
                     # 오늘 첫 조회
                     if state.get('last_date') != today:
                         state['last_date'] = today
                         state['open_price'] = open_price
-                        state['last_alert_price'] = open_price
                         state['sent_open_alert'] = False
                         state['sent_close_alert'] = False
+                        # 모든 사용자의 last_alert_price 초기화
+                        for chat_id in state.get('users', {}):
+                            state['users'][chat_id]['last_alert_price'] = open_price
                         save_state(state)
 
-                    # 시작가 알림
+                    # 시작가 알림 (모든 활성 사용자)
                     if not state.get('sent_open_alert') and now.hour == 9 and now.minute >= 5:
                         change = ((open_price - price_data['prev_close']) / price_data['prev_close']) * 100
                         arrow = "🔺" if change >= 0 else "🔻"
@@ -649,32 +644,53 @@ async def price_monitor(app):
 📈 전일대비: {arrow} {change:+.2f}%
 ⏰ {now.strftime('%Y-%m-%d %H:%M')}"""
 
-                        await send_alert(app, config, message)
+                        await send_to_all_active(app, message)
                         state['sent_open_alert'] = True
                         save_state(state)
 
-                    # 변동 알림
-                    last_alert_price = state.get('last_alert_price', open_price)
-                    if last_alert_price > 0:
-                        change = ((current_price - last_alert_price) / last_alert_price) * 100
+                    # 변동 알림 (개인별 threshold 적용)
+                    admin_id = str(config['telegram']['chat_id'])
+                    users = state.get('users', {})
 
-                        if abs(change) >= threshold:
-                            direction = "상승" if change > 0 else "하락"
-                            emoji = "🚀" if change > 0 else "📉"
-                            change_from_open = ((current_price - open_price) / open_price) * 100
+                    # 관리자도 체크 (users에 없으면 기본값)
+                    all_check_ids = set(users.keys())
+                    all_check_ids.add(admin_id)
 
-                            message = f"""{emoji} <b>{STOCK_NAME} {abs(change):.1f}% {direction}!</b>
+                    for chat_id in all_check_ids:
+                        user_settings = users.get(chat_id, {
+                            'enabled': True,
+                            'threshold': DEFAULT_THRESHOLD,
+                            'last_alert_price': open_price
+                        })
+
+                        if not user_settings.get('enabled', True):
+                            continue
+
+                        threshold = user_settings.get('threshold', DEFAULT_THRESHOLD)
+                        last_alert_price = user_settings.get('last_alert_price', open_price)
+
+                        if last_alert_price > 0:
+                            change = ((current_price - last_alert_price) / last_alert_price) * 100
+
+                            if abs(change) >= threshold:
+                                direction = "상승" if change > 0 else "하락"
+                                emoji = "🚀" if change > 0 else "📉"
+                                change_from_open = ((current_price - open_price) / open_price) * 100
+
+                                message = f"""{emoji} <b>{STOCK_NAME} {abs(change):.1f}% {direction}!</b>
 
 💰 현재가: {format_price(current_price)}원
 📊 시가대비: {change_from_open:+.2f}%
-📍 알림기준: {format_price(last_alert_price)}원
+📍 내 알림기준: {format_price(last_alert_price)}원
 ⏰ {now.strftime('%H:%M:%S')}"""
 
-                            await send_alert(app, config, message)
-                            state['last_alert_price'] = current_price
-                            save_state(state)
+                                if await send_to_user(app, chat_id, message):
+                                    # 해당 사용자의 last_alert_price만 업데이트
+                                    if chat_id in state.get('users', {}):
+                                        state['users'][chat_id]['last_alert_price'] = current_price
+                                        save_state(state)
 
-                    # 종가 알림
+                    # 종가 알림 (모든 활성 사용자)
                     if not state.get('sent_close_alert') and now.hour >= 15 and now.minute >= 30:
                         change_from_open = ((current_price - open_price) / open_price) * 100
                         result_emoji = "📈" if change_from_open >= 0 else "📉"
@@ -691,7 +707,7 @@ async def price_monitor(app):
 
 ⏰ {now.strftime('%Y-%m-%d %H:%M')}"""
 
-                        await send_alert(app, config, message)
+                        await send_to_all_active(app, message)
                         state['sent_close_alert'] = True
                         save_state(state)
 
@@ -704,21 +720,16 @@ async def price_monitor(app):
 
 # ============ 메인 ============
 
-import asyncio
-
 async def main():
     """메인 함수"""
     config = load_config()
     token = config['telegram']['bot_token']
 
-    # 봇 생성
     app = Application.builder().token(token).build()
 
     # 핸들러 등록
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("subscribe", subscribe))
-    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("restart", restart))
     app.add_handler(CallbackQueryHandler(button_callback))
 
@@ -752,7 +763,6 @@ async def main():
     await app.start()
     await app.updater.start_polling()
 
-    # 종료 대기
     try:
         while True:
             await asyncio.sleep(1)
