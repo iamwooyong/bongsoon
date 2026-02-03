@@ -301,6 +301,11 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
             output = result.stdout.strip() or "Already up to date."
             await update.message.reply_text(f"✅ 업데이트 완료:\n<code>{output}</code>\n\n🔄 재시작 중...", parse_mode='HTML')
 
+            # 재시작 후 알림 보낼 chat_id 저장
+            state = load_state()
+            state['restart_chat_id'] = str(update.effective_chat.id)
+            save_state(state)
+
             # 잠시 대기 후 프로세스 종료 (Docker가 자동 재시작)
             await asyncio.sleep(1)
             os._exit(0)
@@ -721,6 +726,26 @@ async def main():
     asyncio.create_task(price_monitor(app))
 
     logger.info(f"{STOCK_NAME} 알림봇 시작")
+
+    # 재시작 완료 알림
+    state = load_state()
+    restart_chat_id = state.pop('restart_chat_id', None)
+    if restart_chat_id:
+        save_state(state)
+        try:
+            await app.bot.send_message(
+                chat_id=restart_chat_id,
+                text=f"""✅ <b>재시작 완료!</b>
+
+🤖 <b>{STOCK_NAME} 알림봇</b>
+
+종목코드: {STOCK_CODE}
+아래 버튼을 눌러 정보를 확인하세요.""",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"재시작 알림 실패: {e}")
 
     # 봇 실행
     await app.initialize()
