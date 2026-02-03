@@ -1,0 +1,8 @@
+{
+  "telegram": {
+    "bot_token": "여기에_봇_토큰_입력",
+    "chat_id": "여기에_채팅_ID_입력"
+  },
+  "check_interval": 60,
+  "alert_threshold": 2.0
+}
