@@ -43,6 +43,12 @@ STOCK_NAME = '아이센스'
 DEFAULT_THRESHOLD = 2
 DEFAULT_ENABLED = True
 
+# 시간대별 알림 슬롯 (09:30 ~ 15:00, 30분 단위)
+TIME_SLOTS = [
+    '09:30', '10:00', '10:30', '11:00', '11:30', '12:00',
+    '12:30', '13:00', '13:30', '14:00', '14:30', '15:00'
+]
+
 
 def load_config():
     """설정 파일 로드"""
@@ -182,7 +188,10 @@ def get_main_keyboard():
             InlineKeyboardButton("🔔 알림설정", callback_data='alert_menu'),
         ],
         [
+            InlineKeyboardButton("🕐 시간알림", callback_data='time_alert_menu'),
             InlineKeyboardButton("⚙️ 내설정", callback_data='settings'),
+        ],
+        [
             InlineKeyboardButton("❓ 도움말", callback_data='help'),
         ],
     ]
@@ -292,6 +301,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_chart(query)
     elif data == 'alert_menu':
         await show_alert_menu(query)
+    elif data == 'time_alert_menu':
+        await show_time_alert_menu(query)
+    elif data.startswith('time_toggle_'):
+        slot = data.replace('time_toggle_', '')
+        await toggle_time_alert(query, slot)
     elif data.startswith('alert_set_'):
         threshold = int(data.split('_')[2])
         await set_alert_threshold(query, threshold)
@@ -521,12 +535,16 @@ async def show_settings(query):
         else:
             role = "👤 구독자"
 
+        alert_times = user_settings.get('alert_times', [])
+        times_str = ', '.join(sorted(alert_times)) if alert_times else '없음'
+
         message = f"""⚙️ <b>내 설정</b>
 
 📌 종목: {STOCK_NAME} ({STOCK_CODE})
 🏷️ 역할: {role}
 🔔 알림 상태: {'켜짐' if enabled else '꺼짐'}
 📊 변동 알림: {threshold}%
+🕐 시간알림: {times_str}
 📍 기준가: {format_price(last_alert) if isinstance(last_alert, int) else last_alert}원"""
     else:
         message = f"""⚙️ <b>내 설정</b>
@@ -537,6 +555,78 @@ async def show_settings(query):
 알림을 받으려면 🔔 알림설정에서 구독하세요."""
 
     await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
+
+
+def get_time_alert_keyboard(user_settings):
+    """시간대별 알림 설정 키보드"""
+    alert_times = []
+    if user_settings:
+        alert_times = user_settings.get('alert_times', [])
+
+    keyboard = []
+    for i in range(0, len(TIME_SLOTS), 3):
+        row = []
+        for slot in TIME_SLOTS[i:i+3]:
+            checked = "✅ " if slot in alert_times else ""
+            row.append(InlineKeyboardButton(f"{checked}{slot}", callback_data=f'time_toggle_{slot}'))
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("◀️ 뒤로", callback_data='back')])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def show_time_alert_menu(query):
+    """시간대별 알림 설정 메뉴"""
+    chat_id = str(query.from_user.id)
+    user_settings = get_user_settings(chat_id)
+
+    if user_settings:
+        alert_times = user_settings.get('alert_times', [])
+        if alert_times:
+            times_str = ', '.join(sorted(alert_times))
+            message = f"""🕐 <b>시간대별 알림 설정</b>
+
+📌 현재 설정: <b>{times_str}</b>
+
+원하는 시간을 눌러 ON/OFF 하세요:"""
+        else:
+            message = """🕐 <b>시간대별 알림 설정</b>
+
+📌 설정된 시간 없음
+
+원하는 시간을 눌러 알림을 켜세요:"""
+    else:
+        message = """🕐 <b>시간대별 알림 설정</b>
+
+⚠️ 먼저 🔔 알림설정에서 구독해주세요."""
+        await query.edit_message_text(message, parse_mode='HTML', reply_markup=get_main_keyboard())
+        return
+
+    await query.edit_message_text(
+        message,
+        parse_mode='HTML',
+        reply_markup=get_time_alert_keyboard(user_settings)
+    )
+
+
+async def toggle_time_alert(query, slot):
+    """시간대별 알림 토글"""
+    chat_id = str(query.from_user.id)
+    user_settings = get_user_settings(chat_id)
+
+    if not user_settings:
+        return
+
+    alert_times = user_settings.get('alert_times', [])
+    if slot in alert_times:
+        alert_times.remove(slot)
+    else:
+        alert_times.append(slot)
+
+    user_settings['alert_times'] = alert_times
+    set_user_settings(chat_id, user_settings)
+
+    await show_time_alert_menu(query)
 
 
 async def show_help(query):
@@ -557,9 +647,12 @@ async def show_help(query):
 • 알림 ON/OFF - 개인별
 • 구독/구독해제
 
+<b>🕐 시간알림</b>
+• 09:30~15:00 (30분 단위) 개인별 선택
+• 선택한 시간에 현재가 알림
+
 <b>자동 알림</b>
 • 09:05 - 장 시작가 알림
-• 11:59 - 오전장 현재가 알림
 • 15:30 - 장 마감 종가 알림
 • 설정한 % 변동 시 즉시 알림
 
@@ -605,6 +698,20 @@ async def send_to_all_active(app, message):
     logger.info(f"알림 전송: {sent_count}명")
 
 
+async def send_time_alert(app, slot, message):
+    """특정 시간 슬롯을 구독한 사용자에게 전송"""
+    users = get_all_users()
+    sent_count = 0
+    for chat_id, settings in users.items():
+        if not settings.get('enabled', True):
+            continue
+        alert_times = settings.get('alert_times', [])
+        if slot in alert_times:
+            if await send_to_user(app, chat_id, message):
+                sent_count += 1
+    logger.info(f"시간알림 [{slot}] 전송: {sent_count}명")
+
+
 async def price_monitor(app):
     """주가 모니터링 루프"""
     config = load_config()
@@ -628,8 +735,8 @@ async def price_monitor(app):
                         state['last_date'] = today
                         state['open_price'] = open_price
                         state['sent_open_alert'] = False
-                        state['sent_noon_alert'] = False
                         state['sent_close_alert'] = False
+                        state['sent_time_alerts'] = []
                         # 모든 사용자의 last_alert_price 초기화
                         for chat_id in state.get('users', {}):
                             state['users'][chat_id]['last_alert_price'] = open_price
@@ -650,12 +757,18 @@ async def price_monitor(app):
                         state['sent_open_alert'] = True
                         save_state(state)
 
-                    # 점심 전 현재가 알림 (11:59 이후)
-                    if not state.get('sent_noon_alert') and ((now.hour == 11 and now.minute >= 59) or now.hour >= 12):
-                        change_from_open = ((current_price - open_price) / open_price) * 100
-                        arrow = "🔺" if change_from_open >= 0 else "🔻"
+                    # 시간대별 알림 (개인별 설정)
+                    sent_time_alerts = state.get('sent_time_alerts', [])
+                    for slot in TIME_SLOTS:
+                        if slot in sent_time_alerts:
+                            continue
+                        slot_hour, slot_min = map(int, slot.split(':'))
+                        if now.hour > slot_hour or (now.hour == slot_hour and now.minute >= slot_min):
+                            # 이 시간대를 구독한 사용자들에게 전송
+                            change_from_open = ((current_price - open_price) / open_price) * 100
+                            arrow = "🔺" if change_from_open >= 0 else "🔻"
 
-                        message = f"""🕛 <b>{STOCK_NAME} 오전장 마감</b>
+                            message = f"""🕐 <b>{STOCK_NAME} {slot} 현재가</b>
 
 💰 현재가: {format_price(current_price)}원
 {arrow} 시가대비: {change_from_open:+.2f}%
@@ -666,9 +779,10 @@ async def price_monitor(app):
 
 ⏰ {now.strftime('%H:%M')}"""
 
-                        await send_to_all_active(app, message)
-                        state['sent_noon_alert'] = True
-                        save_state(state)
+                            await send_time_alert(app, slot, message)
+                            sent_time_alerts.append(slot)
+                            state['sent_time_alerts'] = sent_time_alerts
+                            save_state(state)
 
                     # 변동 알림 (개인별 threshold 적용)
                     admin_id = str(config['telegram']['chat_id'])
