@@ -1,0 +1,11 @@
+version: '3'
+services:
+  isens-bot:
+    build: .
+    container_name: isens-bot
+    restart: always
+    volumes:
+      - ./config.json:/app/config.json
+      - ./state.json:/app/state.json
+    environment:
+      - TZ=Asia/Seoul
